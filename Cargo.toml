@@ -1,0 +1,10 @@
+[package]
+name = "oauthx"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "3.1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+warp = "0.3"
+colored = "2.0.0"
