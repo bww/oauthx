@@ -1,7 +1,7 @@
 use std::process;
 
 use tokio;
-use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 use futures_util::future::TryFutureExt;
 
 use clap::Parser;
@@ -50,21 +50,21 @@ async fn cmd() -> Result<i32, error::Error> {
     None    => oauth2::Consumer::empty(),
   };
 
-  let r_url = match conf.return_url.or(opts.return_url) {
-    Some(r_url) => r_url,
-    None        => return Err(error::Error::new("Invalid configuration")),
-  };
+  let (tx, mut rx) = mpsc::channel(1);
+  let tx_filter = warp::any().map(move || tx.clone());
 
-  let (tx, rx) = oneshot::channel();
-  let routes = warp::any()
-    .map(|| {
+  let routes = warp::path("return")
+    .and(tx_filter)
+    .map(|tx: mpsc::Sender<()>| {
+      let _ = tx.send(());
       "Ok"
     });
-  let (addr, server) = warp::serve(routes)
-    .bind_with_graceful_shutdown(([127, 0, 0, 1], 3030), async {
-      rx.await.ok();
+
+  let (_, server) = warp::serve(routes)
+    .bind_with_graceful_shutdown(([127, 0, 0, 1], 3030), async move {
+      rx.recv().await;
     });
 
-  let _ = tx.send(());
+  let _ = tokio::task::spawn(server).await;
   Ok(0)
 }
