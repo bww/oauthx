@@ -2,11 +2,13 @@ use std::process;
 
 use tokio;
 use tokio::sync::mpsc;
-use futures_util::future::TryFutureExt;
 
 use clap::Parser;
 use warp::Filter;
 use colored::Colorize;
+use url::Url;
+use rand::distributions::{Alphanumeric, DistString};
+use open;
 
 mod error;
 mod oauth2;
@@ -28,6 +30,8 @@ pub struct Options {
   pub token_url: Option<String>,
   #[clap(long="url:return", help="The OAuth2 consumer callback URL")]
   pub return_url: Option<String>,
+  #[clap(long="state", help="The state to use to validate the response; if no state is provided, random state will be used")]
+  pub state: Option<String>,
   #[clap(long="config", help="The OAuth2 consumer configuration")]
   pub config: Option<String>,
 }
@@ -50,20 +54,49 @@ async fn cmd() -> Result<i32, error::Error> {
     None    => oauth2::Consumer::empty(),
   };
 
+  let state = match opts.state {
+    Some(val) => val.to_string(),
+    None      => Alphanumeric.sample_string(&mut rand::thread_rng(), 64),
+  };
+  let auth_url = match opts.auth_url.or(conf.auth_url) {
+    Some(url) => url,
+    None      => return Err(error::Error::new("No auth URL defined in configuration")),
+  };
+  let client_id = match opts.client_id.or(conf.client_id) {
+    Some(val) => val,
+    None      => return Err(error::Error::new("No client ID defined in configuration")),
+  };
+
+  let mut url = Url::parse(&auth_url)?;
+  url.query_pairs_mut()
+    .append_pair("response_type", "code")
+    .append_pair("state", &state)
+    .append_pair("client_id", &client_id)
+    .finish();
+
   let (tx, mut rx) = mpsc::channel(1);
   let tx_filter = warp::any().map(move || tx.clone());
 
+  eprintln!(">>> Listening for responses...");
   let routes = warp::path("return")
     .and(tx_filter)
-    .map(|tx: mpsc::Sender<()>| {
-      let _ = tx.send(());
-      "Ok"
+    .and_then(|tx: mpsc::Sender<()>| async move {
+      match tx.send(()).await {
+        Ok(_)    => Ok("OK"),
+        Err(err) => {
+          println!("Could not cancel: {}", err);
+          Err(warp::reject::reject())
+        },
+      }
     });
 
   let (_, server) = warp::serve(routes)
     .bind_with_graceful_shutdown(([127, 0, 0, 1], 3030), async move {
       rx.recv().await;
     });
+
+  eprintln!(">>> {}", url.as_str());
+  open::that(url.as_str())?;
 
   let _ = tokio::task::spawn(server).await;
   Ok(0)
