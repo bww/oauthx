@@ -182,7 +182,7 @@ async fn cmd() -> Result<i32, error::Error> {
     });
 
   if !opts.passive {
-    eprintln!("\nOpening the OAuth2 flow in your browser:\n    ➤ {}\n\nIf your browser doesn't open; paste the link in manually...", url.as_str());
+    eprintln!("\nOpening the OAuth2 flow in your browser. If your browser doesn't open, visit the link manually:\n    ➤ {}\n", url.as_str());
     if opts.interactive {
       confirm("\nInitiate the OAuth2 flow? [y/N] ", "y")?;
     }
