@@ -44,6 +44,8 @@ pub struct Options {
   pub config: Option<String>,
   #[clap(long="passive", help="Wait for a response but do not initiate the OAuth2 flow")]
   pub passive: bool,
+  #[clap(long="interactive", help="Prompt for interactive confirmation")]
+  pub interactive: bool,
 }
 
 impl Options {
@@ -114,8 +116,6 @@ async fn cmd() -> Result<i32, error::Error> {
     .and(state_filter)
     .and(warp::query::<HashMap<String, String>>())
     .and_then(|tx: mpsc::Sender<()>, conf: oauth2::Consumer, client: (String, String), state: String, query: HashMap<String, String>| async move {
-      println!(">>> {:?}", query);
-
       if let Some(err) = query.get("error") {
         return Ok(warp::reply::with_status(render_error(format!("An error occurred: {}", err)), warp::http::StatusCode::BAD_REQUEST));
       }
@@ -139,7 +139,7 @@ async fn cmd() -> Result<i32, error::Error> {
         Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not parse token URL: {}", err)), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
       };
 
-      println!("\nRequesting token from:\n    ➤ {}\n", &url);
+      eprintln!("\nRequesting token from:\n    ➤ {}\n", &url);
       let grant_type = match &conf.grant_type {
         Some(grant_type) => grant_type.clone(),
         None             => "code".to_owned(),
@@ -164,7 +164,7 @@ async fn cmd() -> Result<i32, error::Error> {
         Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not receive response: {}", err)), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
       };
 
-      println!("DATA: {:?}", data);
+      println!("{}", json!(data));
       let rsp = match status {
         reqwest::StatusCode::OK          => warp::reply::with_status(render_response(&data), warp::http::StatusCode::OK),
         reqwest::StatusCode::BAD_REQUEST => warp::reply::with_status(render_error_detail(&data), warp::http::StatusCode::UNAUTHORIZED),
@@ -182,18 +182,20 @@ async fn cmd() -> Result<i32, error::Error> {
     });
 
   if !opts.passive {
-    println!("\nOpening the OAuth2 flow in your browser:\n    ➤ {}\n\nIf your browser doesn't open; paste the link in manually...", url.as_str());
-    confirm("\nInitiate the OAuth2 flow? [y/N] ", "y")?;
+    eprintln!("\nOpening the OAuth2 flow in your browser:\n    ➤ {}\n\nIf your browser doesn't open; paste the link in manually...", url.as_str());
+    if opts.interactive {
+      confirm("\nInitiate the OAuth2 flow? [y/N] ", "y")?;
+    }
     open::that(url.as_str())?;
   }
 
-  println!("Waiting for a response from the service...");
+  eprintln!("Waiting for a response from the service...");
   let _ = tokio::task::spawn(server).await;
   Ok(0)
 }
 
 fn confirm(prompt: &str, expect: &str) -> Result<(), error::Error> {
-  print!("{}", prompt);
+  eprint!("{}", prompt);
   io::stdout().flush()?;
   let mut rsp = String::new();
   if let Err(err) = io::stdin().read_line(&mut rsp) {
