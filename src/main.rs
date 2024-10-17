@@ -1,6 +1,7 @@
 use std::io;
 use std::io::Write;
 use std::process;
+use std::collections::HashMap;
 
 use tokio;
 use tokio::sync::mpsc;
@@ -10,6 +11,8 @@ use warp::Filter;
 use colored::Colorize;
 use url::Url;
 use rand::distributions::{Alphanumeric, DistString};
+use handlebars;
+use serde_json::json;
 use open;
 
 mod error;
@@ -36,6 +39,8 @@ pub struct Options {
   pub state: Option<String>,
   #[clap(long="config", help="The OAuth2 consumer configuration")]
   pub config: Option<String>,
+  #[clap(long="passive", help="Wait for a response but do not initiate the OAuth2 flow")]
+  pub passive: bool,
 }
 
 #[tokio::main]
@@ -78,13 +83,18 @@ async fn cmd() -> Result<i32, error::Error> {
 
   let (tx, mut rx) = mpsc::channel(1);
   let tx_filter = warp::any().map(move || tx.clone());
-
-  eprintln!(">>> Listening for responses...");
   let routes = warp::path("return")
     .and(tx_filter)
-    .and_then(|tx: mpsc::Sender<()>| async move {
+    .and(warp::query::<HashMap<String, String>>())
+    .and_then(|tx: mpsc::Sender<()>, query: HashMap<String, String>| async move {
+      println!(">>> {:?}", query);
+      let reg = handlebars::Handlebars::new();
+      let rsp = match reg.render_template(TEMPLATE_RESPONSE, &json!(query)) {
+        Ok(rsp) => rsp,
+        Err(_)  => return Err(warp::reject::reject()),
+      };
       match tx.send(()).await {
-        Ok(_)    => Ok("OK"),
+        Ok(_)    => Ok(warp::reply::html(rsp)),
         Err(err) => {
           println!("Could not cancel: {}", err);
           Err(warp::reject::reject())
@@ -93,14 +103,17 @@ async fn cmd() -> Result<i32, error::Error> {
     });
 
   let (_, server) = warp::serve(routes)
-    .bind_with_graceful_shutdown(([127, 0, 0, 1], 3030), async move {
+    .bind_with_graceful_shutdown(([127, 0, 0, 1], 4000), async move {
       rx.recv().await;
     });
 
-  eprintln!(">>> {}", url.as_str());
-  confirm("Launch OAuth2 flow? [y/N] ", "y")?;
-  open::that(url.as_str())?;
+  if !opts.passive {
+    println!("\nOpening the OAuth2 flow in your browser:\n    ➤ {}\n\nIf your browser doesn't open; paste the link in manually...", url.as_str());
+    confirm("\nInitiate the OAuth2 flow? [y/N] ", "y")?;
+    open::that(url.as_str())?;
+  }
 
+  println!("Waiting for a response from the service...");
   let _ = tokio::task::spawn(server).await;
   Ok(0)
 }
@@ -117,3 +130,27 @@ fn confirm(prompt: &str, expect: &str) -> Result<(), error::Error> {
     Ok(())
   }
 }
+
+const TEMPLATE_RESPONSE: &str = r#"<html>
+<head>
+  <style>
+    td.key {
+      font-weight: 700;
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+  <h1>Connection created</h1>
+  <p>Received the following data in the response</p>
+  <table>
+  {{ #each this }}
+    <tr>
+      <td class="key"><code>{{ @key }}</code></td>
+      <td><code>{{ this }}</code></td>
+    </tr>
+  {{ /each }}
+  </table>
+</body>
+</html>
+"#;
