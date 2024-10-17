@@ -1,3 +1,5 @@
+use std::io;
+use std::io::Write;
 use std::process;
 
 use tokio;
@@ -96,8 +98,22 @@ async fn cmd() -> Result<i32, error::Error> {
     });
 
   eprintln!(">>> {}", url.as_str());
+  confirm("Launch OAuth2 flow? [y/N] ", "y")?;
   open::that(url.as_str())?;
 
   let _ = tokio::task::spawn(server).await;
   Ok(0)
+}
+
+fn confirm(prompt: &str, expect: &str) -> Result<(), error::Error> {
+  print!("{}", prompt);
+  io::stdout().flush()?;
+  let mut rsp = String::new();
+  if let Err(err) = io::stdin().read_line(&mut rsp) {
+    Err(err.into())
+  } else if rsp.to_lowercase().eq(expect) {
+    Err(error::Error::new("Canceled"))
+  }else{
+    Ok(())
+  }
 }
