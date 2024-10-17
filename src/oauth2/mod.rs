@@ -16,6 +16,8 @@ pub struct Consumer {
   pub token_url: Option<String>,
   #[serde(rename(serialize="return-url", deserialize="return-url"))]
   pub return_url: Option<String>,
+  #[serde(rename(serialize="grant-type", deserialize="grant-type"))]
+  pub grant_type: Option<String>,
 }
 
 impl Consumer {
@@ -26,6 +28,7 @@ impl Consumer {
       auth_url: None,
       token_url: None,
       return_url: None,
+      grant_type: None,
     }
   }
 

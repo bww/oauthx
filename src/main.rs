@@ -36,6 +36,8 @@ pub struct Options {
   pub token_url: Option<String>,
   #[clap(long="url:return", help="The OAuth2 consumer callback URL")]
   pub return_url: Option<String>,
+  #[clap(long="grant:type", help="The OAuth2 grant type to request")]
+  pub grant_type: Option<String>,
   #[clap(long="state", help="The state to use to validate the response; if no state is provided, random state will be used")]
   pub state: Option<String>,
   #[clap(long="config", help="The OAuth2 consumer configuration")]
@@ -52,6 +54,7 @@ impl Options {
       auth_url: self.auth_url.clone().or(conf.auth_url.clone()),
       token_url: self.token_url.clone().or(conf.token_url.clone()),
       return_url: self.return_url.clone().or(conf.return_url.clone()),
+      grant_type: self.grant_type.clone().or(conf.grant_type.clone()),
     }
   }
 }
@@ -83,6 +86,10 @@ async fn cmd() -> Result<i32, error::Error> {
     Some(val) => val,
     None      => return Err(error::Error::new("No client ID defined in configuration")),
   };
+  let client_secret = match opts.client_secret.or(conf.client_secret) {
+    Some(val) => val,
+    None      => return Err(error::Error::new("No client secret defined in configuration")),
+  };
   let state = match opts.state {
     Some(val) => val.to_string(),
     None      => Alphanumeric.sample_string(&mut rand::thread_rng(), 64),
@@ -98,13 +105,15 @@ async fn cmd() -> Result<i32, error::Error> {
   let (tx, mut rx) = mpsc::channel(1);
   let tx_filter = warp::any().map(move || tx.clone());
   let config_filter = warp::any().map(move || rspconf.clone());
+  let client_filter = warp::any().map(move || (client_id.clone(), client_secret.clone()));
   let state_filter = warp::any().map(move || state.clone());
   let routes = warp::path("return")
     .and(tx_filter)
     .and(config_filter)
+    .and(client_filter)
     .and(state_filter)
     .and(warp::query::<HashMap<String, String>>())
-    .and_then(|tx: mpsc::Sender<()>, conf: oauth2::Consumer, state: String, query: HashMap<String, String>| async move {
+    .and_then(|tx: mpsc::Sender<()>, conf: oauth2::Consumer, client: (String, String), state: String, query: HashMap<String, String>| async move {
       println!(">>> {:?}", query);
 
       if let Some(err) = query.get("error") {
@@ -125,25 +134,21 @@ async fn cmd() -> Result<i32, error::Error> {
         Some(code) => code,
         None      => return Ok(warp::reply::with_status(render_error("No authorization code provided"), warp::http::StatusCode::BAD_REQUEST)),
       };
-      let mut url = match Url::parse(&token_url) {
+      let url = match Url::parse(&token_url) {
         Ok(url)  => url,
         Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not parse token URL: {}", err)), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
       };
 
-      let mut url = url.query_pairs_mut()
-        .append_pair("grant_type", "code")
-        .append_pair("code", &code)
-        .finish();
-      if let Some(return_url) = conf.return_url {
-        url = url.query_pairs_mut()
-          .append_pair("redirect_uri", &return_url)
-          .finish();
-      }
-
       println!("\nRequesting token from:\n    ➤ {}\n", &url);
+      let grant_type = match &conf.grant_type {
+        Some(grant_type) => grant_type.clone(),
+        None             => "code".to_owned(),
+      };
       let data = match serde_urlencoded::to_string(&[
-        ("grant_type", "code"),
+        ("grant_type", &grant_type),
         ("code", &code),
+        ("client_id", &client.0),
+        ("client_secret", &client.1),
       ]) {
         Ok(enc)  => enc,
         Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not encode token exchange params: {}", err)), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
@@ -161,8 +166,9 @@ async fn cmd() -> Result<i32, error::Error> {
 
       println!("DATA: {:?}", data);
       let rsp = match status {
-        reqwest::StatusCode::OK => warp::reply::with_status(render_response(&data), warp::http::StatusCode::OK),
-        code => warp::reply::with_status(render_error(format!("Request failed: {}", code)), warp::http::StatusCode::UNAUTHORIZED),
+        reqwest::StatusCode::OK          => warp::reply::with_status(render_response(&data), warp::http::StatusCode::OK),
+        reqwest::StatusCode::BAD_REQUEST => warp::reply::with_status(render_error_detail(&data), warp::http::StatusCode::UNAUTHORIZED),
+        code                             => warp::reply::with_status(render_error(format!("Request failed with status: {}", code)), warp::http::StatusCode::UNAUTHORIZED),
       };
       match tx.send(()).await {
         Ok(_)  => Ok(rsp),
@@ -203,8 +209,12 @@ fn render_error<E: Serialize>(data: E) -> warp::reply::Html<String> {
   render_template(TEMPLATE_ERROR, &json!(data))
 }
 
+fn render_error_detail(data: &serde_json::Value) -> warp::reply::Html<String> {
+  render_template(TEMPLATE_ERROR_DETAIL, data)
+}
+
 fn render_response(data: &serde_json::Value) -> warp::reply::Html<String> {
-  render_template(TEMPLATE_RESPONSE, data)
+  render_template(TEMPLATE_SUCCESS, data)
 }
 
 fn render_template<E: Serialize>(tmpl: &str, data: E) -> warp::reply::Html<String> {
@@ -234,7 +244,33 @@ const TEMPLATE_ERROR: &str = r#"<html>
 </html>
 "#;
 
-const TEMPLATE_RESPONSE: &str = r#"<html>
+const TEMPLATE_ERROR_DETAIL: &str = r#"<html>
+<head>
+  <style>
+    td {
+      font-size: 1.2em;
+    }
+    td.key {
+      font-weight: 700;
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+  <h1>An error occurred</h1>
+  <table>
+  {{ #each this }}
+    <tr>
+      <td class="key"><code>{{ @key }}</code></td>
+      <td><code>{{ this }}</code></td>
+    </tr>
+  {{ /each }}
+  </table>
+</body>
+</html>
+"#;
+
+const TEMPLATE_SUCCESS: &str = r#"<html>
 <head>
   <style>
     td {
@@ -248,7 +284,6 @@ const TEMPLATE_RESPONSE: &str = r#"<html>
 </head>
 <body>
   <h1>Connection created</h1>
-  <p>Received the following data in the response</p>
   <table>
   {{ #each this }}
     <tr>
