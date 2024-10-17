@@ -110,7 +110,7 @@ async fn cmd() -> Result<i32, error::Error> {
   url.query_pairs_mut()
     .append_pair("response_type", "code")
     .append_pair("state", &state)
-    .append_pair("scopes", &conf.scopes.join(" "))
+    .append_pair("scope", &conf.scopes.join(" "))
     .append_pair("client_id", &client_id)
     .finish();
 
