@@ -18,6 +18,8 @@ pub struct Consumer {
   pub return_url: Option<String>,
   #[serde(rename(serialize="grant-type", deserialize="grant-type"))]
   pub grant_type: Option<String>,
+  #[serde(rename(serialize="scopes", deserialize="scopes"), default="Vec::new")]
+  pub scopes: Vec<String>,
 }
 
 impl Consumer {
@@ -29,6 +31,7 @@ impl Consumer {
       token_url: None,
       return_url: None,
       grant_type: None,
+      scopes: Vec::new(),
     }
   }
 

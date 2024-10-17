@@ -38,6 +38,8 @@ pub struct Options {
   pub return_url: Option<String>,
   #[clap(long="grant:type", help="The OAuth2 grant type to request")]
   pub grant_type: Option<String>,
+  #[clap(long="scopes", help="The scopes we are requesting")]
+  pub scopes: Vec<String>,
   #[clap(long="state", help="The state to use to validate the response; if no state is provided, random state will be used")]
   pub state: Option<String>,
   #[clap(long="config", help="The OAuth2 consumer configuration")]
@@ -57,6 +59,10 @@ impl Options {
       token_url: self.token_url.clone().or(conf.token_url.clone()),
       return_url: self.return_url.clone().or(conf.return_url.clone()),
       grant_type: self.grant_type.clone().or(conf.grant_type.clone()),
+      scopes: match &self.scopes.len() {
+        0 => conf.scopes.clone(),
+        _ => self.scopes.clone(),
+      },
     }
   }
 }
@@ -80,6 +86,9 @@ async fn cmd() -> Result<i32, error::Error> {
   };
 
   let rspconf = opts.clone().merge_config(&conf);
+  if rspconf.scopes.len() == 0 {
+    return Err(error::Error::new("No scopes are requested"));
+  }
   let auth_url = match opts.auth_url.or(conf.auth_url) {
     Some(url) => url,
     None      => return Err(error::Error::new("No auth URL defined in configuration")),
@@ -101,6 +110,7 @@ async fn cmd() -> Result<i32, error::Error> {
   url.query_pairs_mut()
     .append_pair("response_type", "code")
     .append_pair("state", &state)
+    .append_pair("scopes", &conf.scopes.join(" "))
     .append_pair("client_id", &client_id)
     .finish();
 
