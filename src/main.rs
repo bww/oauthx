@@ -3,6 +3,7 @@ use std::io::Write;
 use std::process;
 use std::collections::HashMap;
 
+use serde::Serialize;
 use tokio;
 use tokio::sync::mpsc;
 
@@ -43,6 +44,18 @@ pub struct Options {
   pub passive: bool,
 }
 
+impl Options {
+  fn merge_config(&self, conf: &oauth2::Consumer) -> oauth2::Consumer {
+    oauth2::Consumer{
+      client_id: self.client_id.clone().or(conf.client_id.clone()),
+      client_secret: self.client_secret.clone().or(conf.client_secret.clone()),
+      auth_url: self.auth_url.clone().or(conf.auth_url.clone()),
+      token_url: self.token_url.clone().or(conf.token_url.clone()),
+      return_url: self.return_url.clone().or(conf.return_url.clone()),
+    }
+  }
+}
+
 #[tokio::main]
 async fn main() {
   match cmd().await {
@@ -61,10 +74,7 @@ async fn cmd() -> Result<i32, error::Error> {
     None    => oauth2::Consumer::empty(),
   };
 
-  let state = match opts.state {
-    Some(val) => val.to_string(),
-    None      => Alphanumeric.sample_string(&mut rand::thread_rng(), 64),
-  };
+  let rspconf = opts.clone().merge_config(&conf);
   let auth_url = match opts.auth_url.or(conf.auth_url) {
     Some(url) => url,
     None      => return Err(error::Error::new("No auth URL defined in configuration")),
@@ -72,6 +82,10 @@ async fn cmd() -> Result<i32, error::Error> {
   let client_id = match opts.client_id.or(conf.client_id) {
     Some(val) => val,
     None      => return Err(error::Error::new("No client ID defined in configuration")),
+  };
+  let state = match opts.state {
+    Some(val) => val.to_string(),
+    None      => Alphanumeric.sample_string(&mut rand::thread_rng(), 64),
   };
 
   let mut url = Url::parse(&auth_url)?;
@@ -83,22 +97,76 @@ async fn cmd() -> Result<i32, error::Error> {
 
   let (tx, mut rx) = mpsc::channel(1);
   let tx_filter = warp::any().map(move || tx.clone());
+  let config_filter = warp::any().map(move || rspconf.clone());
+  let state_filter = warp::any().map(move || state.clone());
   let routes = warp::path("return")
     .and(tx_filter)
+    .and(config_filter)
+    .and(state_filter)
     .and(warp::query::<HashMap<String, String>>())
-    .and_then(|tx: mpsc::Sender<()>, query: HashMap<String, String>| async move {
+    .and_then(|tx: mpsc::Sender<()>, conf: oauth2::Consumer, state: String, query: HashMap<String, String>| async move {
       println!(">>> {:?}", query);
-      let reg = handlebars::Handlebars::new();
-      let rsp = match reg.render_template(TEMPLATE_RESPONSE, &json!(query)) {
-        Ok(rsp) => rsp,
-        Err(_)  => return Err(warp::reject::reject()),
+
+      if let Some(err) = query.get("error") {
+        return Ok(warp::reply::with_status(render_error(format!("An error occurred: {}", err)), warp::http::StatusCode::BAD_REQUEST));
+      }
+      match query.get("state") {
+        Some(check) => if !check.eq(&state) {
+          return Ok(warp::reply::with_status(render_error("State mismatch"), warp::http::StatusCode::BAD_REQUEST));
+        },
+        None =>  return Ok(warp::reply::with_status(render_error("No state provided"), warp::http::StatusCode::BAD_REQUEST)),
+      }
+
+      let token_url = match conf.token_url {
+        Some(url) => url,
+        None      => return Ok(warp::reply::with_status(render_error("No token defined in configuration"), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
+      };
+      let code = match query.get("code") {
+        Some(code) => code,
+        None      => return Ok(warp::reply::with_status(render_error("No authorization code provided"), warp::http::StatusCode::BAD_REQUEST)),
+      };
+      let mut url = match Url::parse(&token_url) {
+        Ok(url)  => url,
+        Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not parse token URL: {}", err)), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
+      };
+
+      let mut url = url.query_pairs_mut()
+        .append_pair("grant_type", "code")
+        .append_pair("code", &code)
+        .finish();
+      if let Some(return_url) = conf.return_url {
+        url = url.query_pairs_mut()
+          .append_pair("redirect_uri", &return_url)
+          .finish();
+      }
+
+      println!("\nRequesting token from:\n    ➤ {}\n", &url);
+      let data = match serde_urlencoded::to_string(&[
+        ("grant_type", "code"),
+        ("code", &code),
+      ]) {
+        Ok(enc)  => enc,
+        Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not encode token exchange params: {}", err)), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
+      };
+      let client = reqwest::Client::new();
+      let rsp = match client.post(url.as_str()).header("Content-Type", "application/x-www-form-urlencoded").body(data).send().await {
+        Ok(rsp)  => rsp,
+        Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not render template: {}", err)), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
+      };
+      let status = rsp.status();
+      let data: serde_json::Value = match rsp.json().await {
+        Ok(rsp)  => rsp,
+        Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not receive response: {}", err)), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
+      };
+
+      println!("DATA: {:?}", data);
+      let rsp = match status {
+        reqwest::StatusCode::OK => warp::reply::with_status(render_response(&data), warp::http::StatusCode::OK),
+        code => warp::reply::with_status(render_error(format!("Request failed: {}", code)), warp::http::StatusCode::UNAUTHORIZED),
       };
       match tx.send(()).await {
-        Ok(_)    => Ok(warp::reply::html(rsp)),
-        Err(err) => {
-          println!("Could not cancel: {}", err);
-          Err(warp::reject::reject())
-        },
+        Ok(_)  => Ok(rsp),
+        Err(_) => Err(warp::reject::reject()),
       }
     });
 
@@ -131,9 +199,47 @@ fn confirm(prompt: &str, expect: &str) -> Result<(), error::Error> {
   }
 }
 
+fn render_error<E: Serialize>(data: E) -> warp::reply::Html<String> {
+  render_template(TEMPLATE_ERROR, &json!(data))
+}
+
+fn render_response(data: &serde_json::Value) -> warp::reply::Html<String> {
+  render_template(TEMPLATE_RESPONSE, data)
+}
+
+fn render_template<E: Serialize>(tmpl: &str, data: E) -> warp::reply::Html<String> {
+  let reg = handlebars::Handlebars::new();
+  match reg.render_template(tmpl, &json!(data)) {
+    Ok(rsp)  => warp::reply::html(rsp),
+    Err(err) => warp::reply::html(format!("<p>Could not render template: {}</p>", err)),
+  }
+}
+
+const TEMPLATE_ERROR: &str = r#"<html>
+<head>
+  <style>
+    td {
+      font-size: 1.2em;
+    }
+    td.key {
+      font-weight: 700;
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+  <h1>An error occurred</h1>
+  <p>{{ this }}</p>
+</body>
+</html>
+"#;
+
 const TEMPLATE_RESPONSE: &str = r#"<html>
 <head>
   <style>
+    td {
+      font-size: 1.2em;
+    }
     td.key {
       font-weight: 700;
       text-align: right;

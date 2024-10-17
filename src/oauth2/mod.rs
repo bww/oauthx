@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 
 pub mod error;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Consumer {
   #[serde(rename(serialize="client-id", deserialize="client-id"))]
   pub client_id: Option<String>,
@@ -14,6 +14,8 @@ pub struct Consumer {
   pub auth_url: Option<String>,
   #[serde(rename(serialize="token-url", deserialize="token-url"))]
   pub token_url: Option<String>,
+  #[serde(rename(serialize="return-url", deserialize="return-url"))]
+  pub return_url: Option<String>,
 }
 
 impl Consumer {
@@ -23,6 +25,7 @@ impl Consumer {
       client_secret: None,
       auth_url: None,
       token_url: None,
+      return_url: None,
     }
   }
 
