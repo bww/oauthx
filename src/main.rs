@@ -85,10 +85,9 @@ async fn cmd() -> Result<i32, error::Error> {
     None    => oauth2::Consumer::empty(),
   };
 
-  let rspconf = opts.clone().merge_config(&conf);
-  if rspconf.scopes.len() == 0 {
-    return Err(error::Error::new("No scopes are requested"));
-  }
+  let rspopts = opts.clone();
+  let rspconf = rspopts.merge_config(&conf);
+
   let auth_url = match opts.auth_url.or(conf.auth_url) {
     Some(url) => url,
     None      => return Err(error::Error::new("No auth URL defined in configuration")),
@@ -110,24 +109,30 @@ async fn cmd() -> Result<i32, error::Error> {
   url.query_pairs_mut()
     .append_pair("response_type", "code")
     .append_pair("state", &state)
-    .append_pair("scope", &conf.scopes.join(" "))
     .append_pair("client_id", &client_id)
     .finish();
+  if conf.scopes.len() > 0 {
+    url.query_pairs_mut()
+      .append_pair("scope", &conf.scopes.join(" "))
+      .finish();
+  }
 
   let (tx, mut rx) = mpsc::channel(1);
   let tx_filter = warp::any().map(move || tx.clone());
+  let option_filter = warp::any().map(move || rspopts.clone());
   let config_filter = warp::any().map(move || rspconf.clone());
   let client_filter = warp::any().map(move || (client_id.clone(), client_secret.clone()));
   let state_filter = warp::any().map(move || state.clone());
   let routes = warp::path("return")
     .and(tx_filter)
+    .and(option_filter)
     .and(config_filter)
     .and(client_filter)
     .and(state_filter)
     .and(warp::query::<HashMap<String, String>>())
-    .and_then(|tx: mpsc::Sender<()>, conf: oauth2::Consumer, client: (String, String), state: String, query: HashMap<String, String>| async move {
-      if let Some(err) = query.get("error") {
-        return Ok(warp::reply::with_status(render_error(format!("An error occurred: {}", err)), warp::http::StatusCode::BAD_REQUEST));
+    .and_then(|tx: mpsc::Sender<()>, opts: Options, conf: oauth2::Consumer, client: (String, String), state: String, query: HashMap<String, String>| async move {
+      if let Some(_) = query.get("error") {
+        return Ok(warp::reply::with_status(render_error_detail(&json!(query)), warp::http::StatusCode::BAD_REQUEST));
       }
       match query.get("state") {
         Some(check) => if !check.eq(&state) {
@@ -168,13 +173,42 @@ async fn cmd() -> Result<i32, error::Error> {
         Ok(rsp)  => rsp,
         Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not render template: {}", err)), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
       };
+      if opts.debug {
+        eprintln!(">>> {:?}\n", rsp);
+      }
       let status = rsp.status();
-      let data: serde_json::Value = match rsp.json().await {
-        Ok(rsp)  => rsp,
-        Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not receive response: {}", err)), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
+      let ctype = match rsp.headers().get("Content-Type") {
+        Some(ctype) => match ctype.to_str() {
+          Ok(ctype) => match ctype.parse::<mime::Mime>() {
+            Ok(ctype) => ctype,
+            Err(err)  => return Ok(warp::reply::with_status(render_error(format!("Could not parse content type: {}", err)), warp::http::StatusCode::BAD_GATEWAY)),
+          },
+          Err(err)  => return Ok(warp::reply::with_status(render_error(format!("Could not unwrap content type: {}", err)), warp::http::StatusCode::BAD_GATEWAY)),
+        },
+        None => mime::APPLICATION_JSON,
+      };
+      let data: serde_json::Value = if ctype.essence_str().eq(mime::APPLICATION_WWW_FORM_URLENCODED.essence_str()) {
+        if opts.debug {
+          eprintln!(">>> Processing response as URL-encoded: {}\n", ctype.essence_str());
+        }
+        match rsp.text().await {
+          Ok(rsp)  => match serde_urlencoded::from_str::<HashMap<String, String>>(&rsp) {
+            Ok(rsp)  => json!(rsp),
+            Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not decode response: {}", err)), warp::http::StatusCode::BAD_GATEWAY)),
+          },
+          Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not receive URL-encoded response: {}", err)), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
+        }
+      } else {
+        if opts.debug {
+          eprintln!(">>> Processing response as JSON: {}\n", ctype.essence_str());
+        }
+        match rsp.json().await {
+          Ok(rsp)  => rsp,
+          Err(err) => return Ok(warp::reply::with_status(render_error(format!("Could not receive JSON response: {}", err)), warp::http::StatusCode::INTERNAL_SERVER_ERROR)),
+        }
       };
 
-      println!("{}", json!(data));
+      println!("{}", &data);
       let rsp = match status {
         reqwest::StatusCode::OK          => warp::reply::with_status(render_response(&data), warp::http::StatusCode::OK),
         reqwest::StatusCode::BAD_REQUEST => warp::reply::with_status(render_error_detail(&data), warp::http::StatusCode::UNAUTHORIZED),
