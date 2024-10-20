@@ -1,7 +1,7 @@
-# OAuthX manages the OAuth2 authentication flow for CLIs
-Sometimes you just need to get an OAuth token so you can plug it into a tool on the command line for some testing or one-off reason. _OAuth hates this and will stop at nothing to thwart you._
+# OAuthX is the OAuth2 client for CLIs
+Sometimes you just need an OAuth token so you can plug it into a tool on the command line for some ad hoc reason. _OAuth hates this and will stop at nothing to thwart you._
 
-OAuthX, however, mostly shields you from OAuth's cruelty and makes this process sorta manageable.
+OAuthX, however, mostly shields you from OAuth's cruelty and makes this process sorta manageable. **It manages the OAuth2 authentication flow for CLI tools** (with a little help from a proxy) and just gives you an auth token. Finally.
 
 ```
 $ oauthx --config file.yaml
